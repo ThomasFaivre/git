@@ -838,6 +838,7 @@ our %actions = (
 	"commitdiff" => \&git_commitdiff,
 	"commitdiff_plain" => \&git_commitdiff_plain,
 	"commit" => \&git_commit,
+	"diff" => \&git_diff,
 	"forks" => \&git_forks,
 	"heads" => \&git_heads,
 	"history" => \&git_history,
@@ -3295,6 +3296,7 @@ sub git_get_last_activity {
 
 sub git_get_project_refs {
 	($project) = @_;
+	$git_dir = "$projectroot/$project";
 
 	my $descr = git_get_project_description($project) || "none";
 	if (not git_get_head_hash($project)) {
@@ -3309,6 +3311,23 @@ sub git_get_project_refs {
 	my $ref_head = format_ref_marker($refs_heads, $head);
 	return ($ref_head . $ref_remote);
 }
+
+sub git_get_project_status {
+	($project) = @_;
+	$git_dir = "$projectroot/$project";
+
+	open my $fd, "-|", git_cmd(), "--work-tree", $git_dir . "/..", "status", "--porcelain", "-uno";
+	return unless $fd;
+
+	my @output = <$fd>;
+	close $fd or return "";
+	if (@output) {
+		return $cgi->a({-href => href(action=>"diff"), -class => "changes"}, "uncommitted");
+	}
+
+	return "";
+}
+
 
 # Implementation note: when a single remote is wanted, we cannot use 'git
 # remote show -n' because that command always work (assuming it's a remote URL
@@ -5770,6 +5789,8 @@ sub git_project_list_rows {
 		      $cgi->a({-href => href(project=>$pr->{'path'}, action=>"tree")}, "tree") .
 		      ($pr->{'forks'} ? " | " . $cgi->a({-href => href(project=>$pr->{'path'}, action=>"forks")}, "forks") : '') .
 		      "</td>\n" .
+		      "<td class=\"changes\">" . git_get_project_status($pr->{'path'}) .
+		      "</td>\n" .
 		      "<td class=\"tags\">" . git_get_project_refs($pr->{'path'}) .
 		      "</td>\n" .
 		      "</tr>\n";
@@ -5833,6 +5854,7 @@ sub git_project_list_body {
 		print_sort_th('owner', $order, 'Owner') unless $omit_owner;
 		print_sort_th('age', $order, 'Last Change') unless $omit_age_column;
 		print "<th>Links</th>\n";
+		print "<th>Uncommitted</th>\n";
 		print "<th>References</th>\n";
 		print "<th></th>\n" . # for links
 		      "</tr>\n";
@@ -8037,6 +8059,365 @@ sub git_commitdiff {
 		print <$fd>;
 		close $fd
 			or print "Reading git-format-patch failed\n";
+	}
+}
+
+# parse line of git-diff-tree "raw" output
+sub parse_diff_raw_line {
+	my $line = shift;
+	my %res;
+
+	# ':100644 100644 03b218260e99b78c6df0ed378e59ed9205ccc96d 3b93d5e7cc7f7dd4ebed13a5cc1a4ad976fc94d8 M	ls-files.c'
+	# ':100644 100644 7f9281985086971d3877aca27704f2aaf9c448ce bc190ebc71bbd923f2b728e505408f5e54bd073a M	rev-tree.c'
+	if ($line =~ m/^:([0-7]{6}) ([0-7]{6}) ([0-9a-fA-F]{40}) ([0-9a-fA-F]{40}) (.)([0-9]{0,3})\t(.*)$/) {
+		$res{'from_mode'} = $1;
+		$res{'to_mode'} = $2;
+		$res{'from_id'} = $3;
+		$res{'to_id'} = $4;
+		$res{'status'} = $5;
+		$res{'similarity'} = $6;
+		if ($res{'status'} eq 'R' || $res{'status'} eq 'C') { # renamed or copied
+			($res{'from_file'}, $res{'to_file'}) = map { unquote($_) } split("\t", $7);
+		} else {
+			$res{'from_file'} = $res{'to_file'} = $res{'file'} = unquote($7);
+		}
+	}
+	# ':100644 100644 60e79ca... 94067cc... M	rev-tree.c'
+	elsif ($line =~ m/^:([0-7]{6}) ([0-7]{6}) ([0-9a-fA-F]{7})\.{3} ([0-9a-fA-F]{7})\.{3} (.)([0-9]{0,3})\t(.*)$/) {
+		$res{'from_mode'} = $1;
+		$res{'to_mode'} = $2;
+		$res{'status'} = $5;
+		$res{'similarity'} = $6;
+		if ($res{'status'} eq 'R' || $res{'status'} eq 'C') { # renamed or copied
+			($res{'from_file'}, $res{'to_file'}) = map { unquote($_) } split("\t", $7);
+		} else {
+			$res{'from_file'} = $res{'to_file'} = $res{'file'} = unquote($7);
+		}
+	}
+	# 'c512b523472485aef4fff9e57b229d9d243c967f'
+	elsif ($line =~ m/^([0-9a-fA-F]{40})$/) {
+		$res{'commit'} = $1;
+	}
+
+	return wantarray ? %res : \%res;
+}
+
+sub git_diff_body {
+	my ($difftree, $stage) = @_;
+	print "<div class=\"list_head\">\n";
+
+	if (@{$difftree}) {
+		if ($stage) {
+			print(($#{$difftree} + 1) . " files staged:\n");
+		} else {
+			print(($#{$difftree} + 1) . " files uncommitted:\n");
+		}
+	}
+	print "</div>\n";
+
+	print "<table class=\"diff_tree\">\n";
+
+	my $alternate = 1;
+	my $patchno = 0;
+	foreach my $line (@{$difftree}) {
+		my $diff = parsed_difftree_line($line);
+
+		if ($alternate) {
+			print "<tr class=\"dark\">\n";
+		} else {
+			print "<tr class=\"light\">\n";
+		}
+		$alternate ^= 1;
+
+		my ($to_mode_oct, $to_mode_str, $to_file_type);
+		my ($from_mode_oct, $from_mode_str, $from_file_type);
+		if ($diff->{'to_mode'} ne ('0' x 6)) {
+			$to_mode_oct = oct $diff->{'to_mode'};
+			if (S_ISREG($to_mode_oct)) { # only for regular file
+				$to_mode_str = sprintf("%04o", $to_mode_oct & 0777); # permission bits
+			}
+			$to_file_type = file_type($diff->{'to_mode'});
+		}
+		if ($diff->{'from_mode'} ne ('0' x 6)) {
+			$from_mode_oct = oct $diff->{'from_mode'};
+			if (S_ISREG($from_mode_oct)) { # only for regular file
+				$from_mode_str = sprintf("%04o", $from_mode_oct & 0777); # permission bits
+			}
+			$from_file_type = file_type($diff->{'from_mode'});
+		}
+
+		if ($diff->{'status'} eq "A") { # created
+			my $mode_chng = "<span class=\"file_status new\">[new $to_file_type";
+			$mode_chng   .= " with mode: $to_mode_str" if $to_mode_str;
+			$mode_chng   .= "]</span>";
+			print "<td>";
+			print esc_path($diff->{'file'});
+			print "</td>\n";
+			print "<td>$mode_chng</td>\n";
+		} elsif ($diff->{'status'} eq "D") { # deleted
+			my $mode_chng = "<span class=\"file_status deleted\">[deleted $from_file_type]</span>";
+			print "<td>";
+			print esc_path($diff->{'file'});
+			print "</td>\n";
+			print "<td>$mode_chng</td>\n";
+		} elsif ($diff->{'status'} eq "M" || $diff->{'status'} eq "T") { # modified, or type changed
+			my $mode_chnge = "";
+			if ($diff->{'from_mode'} != $diff->{'to_mode'}) {
+				$mode_chnge = "<span class=\"file_status mode_chnge\">[changed";
+				if ($from_file_type ne $to_file_type) {
+					$mode_chnge .= " from $from_file_type to $to_file_type";
+				}
+				if (($from_mode_oct & 0777) != ($to_mode_oct & 0777)) {
+					if ($from_mode_str && $to_mode_str) {
+						$mode_chnge .= " mode: $from_mode_str->$to_mode_str";
+					} elsif ($to_mode_str) {
+						$mode_chnge .= " mode: $to_mode_str";
+					}
+				}
+				$mode_chnge .= "]</span>\n";
+			}
+			print "<td>";
+			print esc_path($diff->{'file'});
+			print "</td>\n";
+			print "<td>$mode_chnge</td>\n";
+
+		} elsif ($diff->{'status'} eq "R" || $diff->{'status'} eq "C") { # renamed or copied
+			my %status_name = ('R' => 'moved', 'C' => 'copied');
+			my $nstatus = $status_name{$diff->{'status'}};
+			my $mode_chng = "";
+			if ($diff->{'from_mode'} != $diff->{'to_mode'}) {
+				# mode also for directories, so we cannot use $to_mode_str
+				$mode_chng = sprintf(", mode: %04o", $to_mode_oct & 0777);
+			}
+
+		} # we should not encounter Unmerged (U) or Unknown (X) status
+		print "</tr>\n";
+	}
+	print "</table>\n";
+}
+
+sub git_diffset_body {
+	my ($diffset, $diff_style, $difftree) = @_;
+	my $patch_idx = 0;
+	my $patch_number = 0;
+	my $patch_line;
+	my $diffinfo;
+	my $to_name;
+	my (%from, %to);
+	my @chunk; # for side-by-side diff
+
+	print "<div class=\"patchset\">\n";
+
+	# skip to first patch
+	while ($patch_line = shift @{$diffset}) {
+		chomp $patch_line;
+
+		last if ($patch_line =~ m/^diff /);
+	}
+
+ PATCH:
+	while ($patch_line) {
+
+		# parse "git diff" header line
+		if ($patch_line =~ m/^diff --git (\"(?:[^\\\"]*(?:\\.[^\\\"]*)*)\"|[^ "]*) (.*)$/) {
+			# $1 is from_name, which we do not use
+			$to_name = unquote($2);
+			$to_name =~ s!^b/!!;
+		} else {
+			$to_name = undef;
+		}
+
+		# check if current patch belong to current raw line
+		# and parse raw git-diff line if needed
+		if (is_patch_split($diffinfo, { 'to_file' => $to_name })) {
+			# this is continuation of a split patch
+			print "<div class=\"patch cont\">\n";
+		} else {
+			# advance raw git-diff output if needed
+			$patch_idx++ if defined $diffinfo;
+
+			# read and prepare patch information
+			$diffinfo = parse_diff_raw_line($difftree->[$patch_idx]);
+
+			# this is first patch for raw difftree line with $patch_idx index
+			# we index @$difftree array from 0, but number patches from 1
+			print "<div class=\"patch\" id=\"patch". ($patch_idx+1) ."\">\n";
+		}
+
+		# git diff header
+		#assert($patch_line =~ m/^diff /) if DEBUG;
+		#assert($patch_line !~ m!$/$!) if DEBUG; # is chomp-ed
+		$patch_number++;
+
+		# print "git diff" header
+		$from{'file'} = $to_name;
+		$to{'file'} = $to_name;
+		print format_git_diff_header_line($patch_line, $diffinfo,
+		                                  \%from, \%to);
+
+		# print extended diff header
+		print "<div class=\"diff extended_header\">\n";
+	EXTENDED_HEADER:
+		while ($patch_line = shift @{$diffset}) {
+			chomp $patch_line;
+
+			last EXTENDED_HEADER if ($patch_line =~ m/^--- |^diff /);
+
+			print format_extended_diff_header_line($patch_line, $diffinfo,
+			                                       \%from, \%to);
+		}
+		print "</div>\n"; # class="diff extended_header"
+
+		# from-file/to-file diff header
+		if (! $patch_line) {
+			print "</div>\n"; # class="patch"
+			last PATCH;
+		}
+		next PATCH if ($patch_line =~ m/^diff /);
+		#assert($patch_line =~ m/^---/) if DEBUG;
+
+		my $last_patch_line = $patch_line;
+		$patch_line = shift @{$diffset};
+		chomp $patch_line;
+		#assert($patch_line =~ m/^\+\+\+/) if DEBUG;
+
+		print format_diff_from_to_header($last_patch_line, $patch_line,
+		                                 $diffinfo, \%from, \%to);
+
+		# the patch itself
+	LINE:
+		while ($patch_line = shift @{$diffset}) {
+			chomp $patch_line;
+
+			next PATCH if ($patch_line =~ m/^diff /);
+
+			my ($class, $line) = process_diff_line($patch_line, \%from, \%to);
+			my $diff_classes = "diff";
+			$diff_classes .= " $class" if ($class);
+			$line = "<div class=\"$diff_classes\">$line</div>\n";
+
+			if ($diff_style eq 'sidebyside') {
+				if ($class eq 'chunk_header') {
+					print_sidebyside_diff_chunk(@chunk);
+					@chunk = ( [ $class, $line ] );
+				} else {
+					push @chunk, [ $class, $line ];
+				}
+			} else {
+				# default 'inline' style and unknown styles
+				print $line;
+			}
+		}
+
+	} continue {
+		if (@chunk) {
+			print_sidebyside_diff_chunk(@chunk);
+			@chunk = ();
+		}
+		print "</div>\n"; # class="patch"
+	}
+
+	if ($patch_number == 0) {
+        print "<div class=\"diff nodifferences\">No differences found</div>\n";
+	}
+
+	print "</div>\n"; # class="patchset"
+}
+
+sub git_diff {
+	my %params = @_;
+	my $format = $params{-format} || 'html';
+	my $diff_style = $input_params{'diff_style'} || 'inline';
+
+	if ($format eq 'patch') {
+		die_error(403, "Patch view not allowed");
+	}
+
+	# read commitdiff
+	my $fd;
+	my @stagetree;
+	my @difftree;
+	my @diffset;
+	if ($format eq 'html') {
+		my $line;
+
+		open $fd, "-|", git_cmd(), "--work-tree", $git_dir . "/..", "diff", "--cached", '-r',
+		    @diff_opts, "--no-commit-id", "--patch-with-raw", "--full-index"
+			or die_error(500, "Open git-diff failed");
+
+		while ($line = <$fd>) {
+			chomp $line;
+
+			# empty line ends raw part of diff-tree output
+			last unless $line;
+			push @stagetree, scalar parse_diff_raw_line($line);
+		}
+
+		while ($line = <$fd>) {
+			chomp $line;
+			push @diffset, $line;
+		}
+		close $fd;
+
+		open $fd, "-|", git_cmd(), "--work-tree", $git_dir . "/..", "diff", '-r',
+		    @diff_opts, "--no-commit-id", "--patch-with-raw", "--full-index"
+			or die_error(500, "Open git-diff failed");
+
+		while ($line = <$fd>) {
+			chomp $line;
+
+			# empty line ends raw part of diff-tree output
+			last unless $line;
+			push @difftree, scalar parse_diff_raw_line($line);
+		}
+
+		while ($line = <$fd>) {
+			chomp $line;
+			push @diffset, $line;
+		}
+		close $fd;
+
+	} elsif ($format eq 'plain') {
+		open $fd, "-|", git_cmd(), "--work-tree", $git_dir . "/..", "diff", '-r', @diff_opts, '-p'
+			or die_error(500, "Open git-diff failed");
+	} else {
+		die_error(400, "Unknown diff format");
+	}
+
+	# write commit message
+	if ($format eq 'html') {
+		git_header_html(undef, '');
+		git_print_page_nav('diff');
+		print "<div class=\"page_body\">\n";
+
+	} elsif ($format eq 'plain') {
+		print $cgi->header(
+			-type => 'text/plain',
+			-charset => 'utf-8',
+			-expires => '',
+			-content_disposition => 'inline');
+	}
+
+	# write patch
+	if ($format eq 'html') {
+		git_diff_body(\@stagetree, 1);
+		print "<br/>\n";
+		git_diff_body(\@difftree, 0);
+		print "<br/>\n";
+
+		# concat stagetree and difftree in difftree
+		@difftree = (@stagetree, @difftree);
+
+		git_diffset_body(\@diffset, $diff_style,
+		                 \@difftree);
+		print "</div>\n"; # class="page_body"
+		git_footer_html();
+
+	} elsif ($format eq 'plain') {
+		local $/ = undef;
+		print <$fd>;
+		close $fd
+			or print "Reading git-diff failed\n";
 	}
 }
 
