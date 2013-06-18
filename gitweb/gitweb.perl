@@ -2057,6 +2057,9 @@ sub format_log_line_html {
 		$cgi->a({-href => href(action=>"object", hash=>$1),
 					-class => "text"}, $1);
 	}egx;
+	$line =~ s{PR=([0-9]{5})}{
+		"PR=".$cgi->a({-href => "http://core/bug6illa/show_bug.cgi?id=$1"}, "$1");
+	}egx;
 
 	return $line;
 }
