@@ -3293,6 +3293,23 @@ sub git_get_last_activity {
 	return (undef, undef);
 }
 
+sub git_get_project_refs {
+	($project) = @_;
+
+	my $descr = git_get_project_description($project) || "none";
+	if (not git_get_head_hash($project)) {
+		return "";
+	}
+	my %co = parse_commit("HEAD");
+	my $head = $co{'id'};
+	my $refs_remotes = git_get_references("remotes");
+	my $refs_heads = git_get_references("heads");
+
+	my $ref_remote = format_ref_marker($refs_remotes, $head);
+	my $ref_head = format_ref_marker($refs_heads, $head);
+	return ($ref_head . $ref_remote);
+}
+
 # Implementation note: when a single remote is wanted, we cannot use 'git
 # remote show -n' because that command always work (assuming it's a remote URL
 # if it's not defined), and we cannot use 'git remote show' because that would
@@ -3336,8 +3353,7 @@ sub git_get_references {
 	my %refs;
 	# 5dc01c595e6c6ec9ccda4f6f69c131c0dd945f8c refs/tags/v2.6.11
 	# c39ae07f393806ccf406ef966e9a15afc43cc36a refs/tags/v2.6.11^{}
-	open my $fd, "-|", git_cmd(), "show-ref", "--dereference",
-		($type ? ("--", "refs/$type") : ()) # use -- <pattern> if $type
+	open my $fd, "-|", git_cmd(), "show-ref", "--dereference"
 		or return;
 
 	while (my $line = <$fd>) {
@@ -5754,6 +5770,8 @@ sub git_project_list_rows {
 		      $cgi->a({-href => href(project=>$pr->{'path'}, action=>"tree")}, "tree") .
 		      ($pr->{'forks'} ? " | " . $cgi->a({-href => href(project=>$pr->{'path'}, action=>"forks")}, "forks") : '') .
 		      "</td>\n" .
+		      "<td class=\"tags\">" . git_get_project_refs($pr->{'path'}) .
+		      "</td>\n" .
 		      "</tr>\n";
 	}
 }
@@ -5814,6 +5832,8 @@ sub git_project_list_body {
 		print_sort_th('descr', $order, 'Description');
 		print_sort_th('owner', $order, 'Owner') unless $omit_owner;
 		print_sort_th('age', $order, 'Last Change') unless $omit_age_column;
+		print "<th>Links</th>\n";
+		print "<th>References</th>\n";
 		print "<th></th>\n" . # for links
 		      "</tr>\n";
 	}
