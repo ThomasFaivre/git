@@ -8294,22 +8294,7 @@ sub git_diffset_body {
 
 			next PATCH if ($patch_line =~ m/^diff /);
 
-			my ($class, $line) = process_diff_line($patch_line, \%from, \%to);
-			my $diff_classes = "diff";
-			$diff_classes .= " $class" if ($class);
-			$line = "<div class=\"$diff_classes\">$line</div>\n";
-
-			if ($diff_style eq 'sidebyside') {
-				if ($class eq 'chunk_header') {
-					print_sidebyside_diff_chunk(@chunk);
-					@chunk = ( [ $class, $line ] );
-				} else {
-					push @chunk, [ $class, $line ];
-				}
-			} else {
-				# default 'inline' style and unknown styles
-				print $line;
-			}
+			print format_diff_line($patch_line, '', \%from, \%to);
 		}
 
 	} continue {
