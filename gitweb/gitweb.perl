@@ -2036,30 +2036,43 @@ sub file_type_long {
 
 # format line of commit message.
 sub format_log_line_html {
-	my $line = shift;
+	my $raw_line = shift;
+	my $line = esc_html($raw_line, -nbsp=>1);
 
-	$line = esc_html($line, -nbsp=>1);
-	$line =~ s{
-        \b
+	my $commit_re = "\\b
         (
-            # The output of "git describe", e.g. v2.10.0-297-gf6727b0
+            # The output of 'git describe', e.g. v2.10.0-297-gf6727b0
             # or hadoop-20160921-113441-20-g094fb7d
             (?<!-) # see strbuf_check_tag_ref(). Tags can't start with -
             [A-Za-z0-9.-]+
-            (?!\.) # refs can't end with ".", see check_refname_format()
+            (?!\.) # refs can't end with '.', see check_refname_format()
             -g[0-9a-fA-F]{7,40}
             |
             # Just a normal looking Git SHA1
             [0-9a-fA-F]{7,40}
         )
-        \b
-    }{
-		$cgi->a({-href => href(action=>"object", hash=>$1),
-					-class => "text"}, $1);
-	}egx;
-	$line =~ s{PR=([0-9]{5})}{
-		"PR=".$cgi->a({-href => "http://core/bug6illa/show_bug.cgi?id=$1"}, "$1");
-	}egx;
+        \\b";
+
+	if ($raw_line =~ m!\b\w+://\S+\b!) {
+		# Full link
+		$line =~ s{(\w+://\S+)}{
+		        $cgi->a({-href => "$1"}, $1);
+		}eg;
+	} elsif ($raw_line =~ m!$commit_re!x) {
+		# Commit ID
+		# Can be contained in a full link so check this in second
+		$line =~ s{$commit_re}{
+		        $cgi->a({-href => href(action=>"object", hash=>$1),
+		        -class => "text"}, $1);
+		}egx;
+	}
+
+	if ($raw_line =~ m!^  [0-9]{5} \[\w+\]! or $raw_line =~ m!PR[= ]?[0-9]{5}!) {
+		# PR number
+		$line =~ s{([0-9]{5})}{
+		        $cgi->a({-href => "http://core.dev.6wind.com/bug6illa/show_bug.cgi?id=$1"}, $1);
+		}eg;
+	}
 
 	return $line;
 }
