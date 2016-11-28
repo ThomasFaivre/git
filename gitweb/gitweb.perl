@@ -6351,8 +6351,7 @@ sub git_search_files {
 			$file = $1;
 			$binary = 1;
 		} else {
-			($file, $lno, $ltext) = split(/\0/, $line, 3);
-			$file =~ s/^$co{'tree'}://;
+			($_, $file, $lno, $ltext) = split(/\0/, $line, 4);
 		}
 		if ($file ne $lastfile) {
 			$lastfile and print "</td></tr>\n";

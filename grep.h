@@ -155,6 +155,7 @@ struct grep_opt {
 	int funcbody;
 	int extended_regexp_option;
 	int pattern_type_option;
+	char color_branch[COLOR_MAXLEN];
 	char color_context[COLOR_MAXLEN];
 	char color_filename[COLOR_MAXLEN];
 	char color_function[COLOR_MAXLEN];
@@ -163,6 +164,7 @@ struct grep_opt {
 	char color_match_selected[COLOR_MAXLEN];
 	char color_selected[COLOR_MAXLEN];
 	char color_sep[COLOR_MAXLEN];
+	char color_submodule[COLOR_MAXLEN];
 	unsigned pre_context;
 	unsigned post_context;
 	unsigned last_shown;
@@ -189,6 +191,8 @@ extern int grep_buffer(struct grep_opt *opt, char *buf, unsigned long size);
 
 struct grep_source {
 	char *name;
+	char *tree_name;
+	char *submodule_name;
 
 	enum grep_source_type {
 		GREP_SOURCE_OID,
@@ -205,7 +209,8 @@ struct grep_source {
 };
 
 void grep_source_init(struct grep_source *gs, enum grep_source_type type,
-		      const char *name, const char *path,
+		      const char *name, const char *tree_name,
+		      const char *submodule_name, const char *path,
 		      const void *identifier);
 void grep_source_clear_data(struct grep_source *gs);
 void grep_source_clear(struct grep_source *gs);

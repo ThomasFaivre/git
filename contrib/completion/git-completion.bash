@@ -2381,6 +2381,7 @@ _git_config ()
 		color.diff.plain
 		color.diff.whitespace
 		color.grep
+		color.grep.branch
 		color.grep.context
 		color.grep.filename
 		color.grep.function
@@ -2388,6 +2389,7 @@ _git_config ()
 		color.grep.match
 		color.grep.selected
 		color.grep.separator
+		color.grep.submodule
 		color.interactive
 		color.interactive.error
 		color.interactive.header

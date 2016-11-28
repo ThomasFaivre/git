@@ -93,7 +93,9 @@ static pthread_cond_t cond_result;
 static int skip_first_line;
 
 static void add_work(struct grep_opt *opt, enum grep_source_type type,
-		     const char *name, const char *path, const void *id)
+		     const char *name, const char *tree_name,
+		     const char *submodule_name, const char *path,
+		     const void *id)
 {
 	grep_lock();
 
@@ -101,7 +103,8 @@ static void add_work(struct grep_opt *opt, enum grep_source_type type,
 		pthread_cond_wait(&cond_write, &grep_mutex);
 	}
 
-	grep_source_init(&todo[todo_end].source, type, name, path, id);
+	grep_source_init(&todo[todo_end].source, type, name, tree_name,
+			 submodule_name, path, id);
 	if (opt->binary != GREP_BINARY_TEXT)
 		grep_source_load_driver(&todo[todo_end].source);
 	todo[todo_end].done = 0;
@@ -313,22 +316,41 @@ static void *lock_and_read_oid_file(const struct object_id *oid, enum object_typ
 }
 
 static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
-		     const char *filename, int tree_name_len,
+		     const char *filename, int tree_name_len, int submodule_len,
 		     const char *path)
 {
 	struct strbuf pathbuf = STRBUF_INIT;
+	struct strbuf treebuf = STRBUF_INIT;
+	struct strbuf submodulebuf = STRBUF_INIT;
+
+	if (tree_name_len)
+		strbuf_add(&treebuf, filename, tree_name_len - 1);
 
 	if (opt->relative && opt->prefix_length) {
-		quote_path_relative(filename + tree_name_len, opt->prefix, &pathbuf);
-		strbuf_insert(&pathbuf, 0, filename, tree_name_len);
+		if (submodule_len) {
+			quote_path_relative(filename + tree_name_len, opt->prefix, &submodulebuf);
+			submodule_len = submodulebuf.len - strlen(filename) +
+				tree_name_len + submodule_len;
+
+			strbuf_addstr(&pathbuf, submodulebuf.buf + submodule_len);
+			strbuf_setlen(&submodulebuf, submodule_len - 1);
+		} else {
+			quote_path_relative(filename + tree_name_len, opt->prefix, &pathbuf);
+		}
 	} else {
-		strbuf_addstr(&pathbuf, filename);
+		if (submodule_len)
+			strbuf_add(&submodulebuf, filename + tree_name_len, submodule_len - 1);
+
+		strbuf_addstr(&pathbuf, filename + tree_name_len + submodule_len);
 	}
 
 #ifndef NO_PTHREADS
 	if (num_threads) {
-		add_work(opt, GREP_SOURCE_OID, pathbuf.buf, path, oid);
+		add_work(opt, GREP_SOURCE_OID, pathbuf.buf, treebuf.buf,
+			 submodulebuf.buf, path, oid);
 		strbuf_release(&pathbuf);
+		strbuf_release(&treebuf);
+		strbuf_release(&submodulebuf);
 		return 0;
 	} else
 #endif
@@ -336,8 +358,11 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 		struct grep_source gs;
 		int hit;
 
-		grep_source_init(&gs, GREP_SOURCE_OID, pathbuf.buf, path, oid);
+		grep_source_init(&gs, GREP_SOURCE_OID, pathbuf.buf,
+				 treebuf.buf, submodulebuf.buf, path, oid);
 		strbuf_release(&pathbuf);
+		strbuf_release(&treebuf);
+		strbuf_release(&submodulebuf);
 		hit = grep_source(opt, &gs);
 
 		grep_source_clear(&gs);
@@ -356,7 +381,8 @@ static int grep_file(struct grep_opt *opt, const char *filename)
 
 #ifndef NO_PTHREADS
 	if (num_threads) {
-		add_work(opt, GREP_SOURCE_FILE, buf.buf, filename, filename);
+		add_work(opt, GREP_SOURCE_FILE, buf.buf, NULL, NULL, filename,
+			 filename);
 		strbuf_release(&buf);
 		return 0;
 	} else
@@ -365,7 +391,8 @@ static int grep_file(struct grep_opt *opt, const char *filename)
 		struct grep_source gs;
 		int hit;
 
-		grep_source_init(&gs, GREP_SOURCE_FILE, buf.buf, filename, filename);
+		grep_source_init(&gs, GREP_SOURCE_FILE, buf.buf, NULL, NULL,
+				 filename, filename);
 		strbuf_release(&buf);
 		hit = grep_source(opt, &gs);
 
@@ -403,12 +430,13 @@ static int grep_cache(struct grep_opt *opt, struct repository *repo,
 		      const struct pathspec *pathspec, int cached);
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
-		     int check_attr, struct repository *repo);
+		     int sm_len, int check_attr, struct repository *repo);
 
 static int grep_submodule(struct grep_opt *opt, struct repository *superproject,
 			  const struct pathspec *pathspec,
 			  const struct object_id *oid,
-			  const char *filename, const char *path)
+			  const char *filename, int tn_len,
+			  const char *path)
 {
 	struct repository submodule;
 	int hit;
@@ -456,8 +484,9 @@ static int grep_submodule(struct grep_opt *opt, struct repository *superproject,
 		strbuf_addch(&base, '/');
 
 		init_tree_desc(&tree, data, size);
-		hit = grep_tree(opt, pathspec, &tree, &base, base.len,
-				object->type == OBJ_COMMIT, &submodule);
+		hit = grep_tree(opt, pathspec, &tree, &base, tn_len,
+				base.len - tn_len, object->type == OBJ_COMMIT,
+				&submodule);
 		strbuf_release(&base);
 		free(data);
 	} else {
@@ -501,13 +530,15 @@ static int grep_cache(struct grep_opt *opt, struct repository *repo,
 				if (ce_stage(ce) || ce_intent_to_add(ce))
 					continue;
 				hit |= grep_oid(opt, &ce->oid, name.buf,
-						 0, name.buf);
+						 0, name_base_len, name.buf);
 			} else {
 				hit |= grep_file(opt, name.buf);
 			}
 		} else if (recurse_submodules && S_ISGITLINK(ce->ce_mode) &&
 			   submodule_path_match(pathspec, name.buf, NULL)) {
-			hit |= grep_submodule(opt, repo, pathspec, NULL, ce->name, ce->name);
+			hit |= grep_submodule(opt, repo, pathspec, NULL,
+					      ce->name, 0, ce->name);
+
 		} else {
 			continue;
 		}
@@ -529,7 +560,7 @@ static int grep_cache(struct grep_opt *opt, struct repository *repo,
 
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
-		     int check_attr, struct repository *repo)
+		     int sm_len, int check_attr, struct repository *repo)
 {
 	int hit = 0;
 	enum interesting match = entry_not_interesting;
@@ -546,7 +577,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		int te_len = tree_entry_len(&entry);
 
 		if (match != all_entries_interesting) {
-			strbuf_addstr(&name, base->buf + tn_len);
+			strbuf_addstr(&name, base->buf + tn_len + name_base_len);
 			match = tree_entry_interesting(&entry, &name,
 						       0, pathspec);
 			strbuf_setlen(&name, name_base_len);
@@ -560,7 +591,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		strbuf_add(base, entry.path, te_len);
 
 		if (S_ISREG(entry.mode)) {
-			hit |= grep_oid(opt, entry.oid, base->buf, tn_len,
+			hit |= grep_oid(opt, entry.oid, base->buf, tn_len, sm_len,
 					 check_attr ? base->buf + tn_len : NULL);
 		} else if (S_ISDIR(entry.mode)) {
 			enum object_type type;
@@ -576,11 +607,12 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			strbuf_addch(base, '/');
 			init_tree_desc(&sub, data, size);
 			hit |= grep_tree(opt, pathspec, &sub, base, tn_len,
-					 check_attr, repo);
+					 sm_len, check_attr, repo);
 			free(data);
 		} else if (recurse_submodules && S_ISGITLINK(entry.mode)) {
 			hit |= grep_submodule(opt, repo, pathspec, entry.oid,
-					      base->buf, base->buf + tn_len);
+					      base->buf, tn_len, base->buf +
+					      tn_len + name_base_len);
 		}
 
 		strbuf_setlen(base, old_baselen);
@@ -598,7 +630,7 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		       struct repository *repo)
 {
 	if (obj->type == OBJ_BLOB)
-		return grep_oid(opt, &obj->oid, name, 0, path);
+		return grep_oid(opt, &obj->oid, name, 0, 0, path);
 	if (obj->type == OBJ_COMMIT || obj->type == OBJ_TREE) {
 		struct tree_desc tree;
 		void *data;
@@ -621,7 +653,7 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 			strbuf_addch(&base, ':');
 		}
 		init_tree_desc(&tree, data, size);
-		hit = grep_tree(opt, pathspec, &tree, &base, base.len,
+		hit = grep_tree(opt, pathspec, &tree, &base, base.len, 0,
 				obj->type == OBJ_COMMIT, repo);
 		strbuf_release(&base);
 		free(data);

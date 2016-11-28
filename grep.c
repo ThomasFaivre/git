@@ -37,6 +37,7 @@ void init_grep_defaults(void)
 	opt->pathname = 1;
 	opt->max_depth = -1;
 	opt->pattern_type_option = GREP_PATTERN_TYPE_UNSPECIFIED;
+	color_set(opt->color_branch, "");
 	color_set(opt->color_context, "");
 	color_set(opt->color_filename, "");
 	color_set(opt->color_function, "");
@@ -45,6 +46,7 @@ void init_grep_defaults(void)
 	color_set(opt->color_match_selected, GIT_COLOR_BOLD_RED);
 	color_set(opt->color_selected, "");
 	color_set(opt->color_sep, GIT_COLOR_CYAN);
+	color_set(opt->color_submodule, "");
 	opt->color = -1;
 	opt->output = std_output;
 }
@@ -98,6 +100,8 @@ int grep_config(const char *var, const char *value, void *cb)
 
 	if (!strcmp(var, "color.grep"))
 		opt->color = git_config_colorbool(var, value);
+	else if (!strcmp(var, "color.grep.branch"))
+		color = opt->color_branch;
 	else if (!strcmp(var, "color.grep.context"))
 		color = opt->color_context;
 	else if (!strcmp(var, "color.grep.filename"))
@@ -114,6 +118,8 @@ int grep_config(const char *var, const char *value, void *cb)
 		color = opt->color_selected;
 	else if (!strcmp(var, "color.grep.separator"))
 		color = opt->color_sep;
+	else if (!strcmp(var, "color.grep.submodule"))
+		color = opt->color_submodule;
 	else if (!strcmp(var, "color.grep.match")) {
 		int rc = 0;
 		if (!value)
@@ -155,6 +161,7 @@ void grep_init(struct grep_opt *opt, const char *prefix)
 	opt->relative = def->relative;
 	opt->output = def->output;
 
+	color_set(opt->color_branch, def->color_branch);
 	color_set(opt->color_context, def->color_context);
 	color_set(opt->color_filename, def->color_filename);
 	color_set(opt->color_function, def->color_function);
@@ -163,6 +170,7 @@ void grep_init(struct grep_opt *opt, const char *prefix)
 	color_set(opt->color_match_selected, def->color_match_selected);
 	color_set(opt->color_selected, def->color_selected);
 	color_set(opt->color_sep, def->color_sep);
+	color_set(opt->color_submodule, def->color_submodule);
 }
 
 static void grep_set_pattern_type_option(enum grep_pattern_type pattern_type, struct grep_opt *opt)
@@ -1098,8 +1106,20 @@ static void output_sep(struct grep_opt *opt, char sign)
 		output_color(opt, &sign, 1, opt->color_sep);
 }
 
-static void show_name(struct grep_opt *opt, const char *name)
+static void output_prefix(struct grep_opt *opt, const char *prefix,
+			  const char *color, char sign)
 {
+	if (prefix && strlen(prefix)) {
+		output_color(opt, prefix, strlen(prefix), color);
+		output_sep(opt, sign);
+	}
+}
+
+static void show_name(struct grep_opt *opt, const char *name,
+		      const char *tree_name, const char *submodule_name)
+{
+	output_prefix(opt, tree_name, opt->color_branch, ':');
+	output_prefix(opt, submodule_name, opt->color_submodule, '/');
 	output_color(opt, name, strlen(name), opt->color_filename);
 	opt->output(opt, opt->null_following_name ? "\0" : "\n", 1);
 }
@@ -1356,7 +1376,8 @@ static int next_match(struct grep_opt *opt, char *bol, char *eol,
 }
 
 static void show_line(struct grep_opt *opt, char *bol, char *eol,
-		      const char *name, unsigned lno, char sign)
+		      const char *name, const char *tree_name,
+		      const char *submodule_name, unsigned lno, char sign)
 {
 	int rest = eol - bol;
 	const char *match_color, *line_color = NULL;
@@ -1376,12 +1397,16 @@ static void show_line(struct grep_opt *opt, char *bol, char *eol,
 		}
 	}
 	if (opt->heading && opt->last_shown == 0) {
+		output_prefix(opt, tree_name, opt->color_branch, ':');
+		output_prefix(opt, submodule_name, opt->color_submodule, '/');
 		output_color(opt, name, strlen(name), opt->color_filename);
 		opt->output(opt, "\n", 1);
 	}
 	opt->last_shown = lno;
 
 	if (!opt->heading && opt->pathname) {
+		output_prefix(opt, tree_name, opt->color_branch, ':');
+		output_prefix(opt, submodule_name, opt->color_submodule, '/');
 		output_color(opt, name, strlen(name), opt->color_filename);
 		output_sep(opt, sign);
 	}
@@ -1496,7 +1521,8 @@ static void show_funcname_line(struct grep_opt *opt, struct grep_source *gs,
 			break;
 
 		if (match_funcname(opt, gs, bol, eol)) {
-			show_line(opt, bol, eol, gs->name, lno, '=');
+			show_line(opt, bol, eol, gs->name, gs->tree_name,
+				  gs->submodule_name, lno, '=');
 			break;
 		}
 	}
@@ -1561,7 +1587,8 @@ static void show_pre_context(struct grep_opt *opt, struct grep_source *gs,
 
 		while (*eol != '\n')
 			eol++;
-		show_line(opt, bol, eol, gs->name, cur, sign);
+		show_line(opt, bol, eol, gs->name, gs->tree_name,
+			  gs->submodule_name, cur, sign);
 		bol = eol + 1;
 		cur++;
 	}
@@ -1805,13 +1832,18 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 			if (opt->status_only)
 				return 1;
 			if (opt->name_only) {
-				show_name(opt, gs->name);
+				show_name(opt, gs->name, gs->tree_name,
+					  gs->submodule_name);
 				return 1;
 			}
 			if (opt->count)
 				goto next_line;
 			if (binary_match_only) {
 				opt->output(opt, "Binary file ", 12);
+				output_prefix(opt, gs->tree_name,
+					      opt->color_branch, ':');
+				output_prefix(opt, gs->submodule_name,
+					      opt->color_submodule, '/');
 				output_color(opt, gs->name, strlen(gs->name),
 					     opt->color_filename);
 				opt->output(opt, " matches\n", 9);
@@ -1824,7 +1856,8 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 				show_pre_context(opt, gs, bol, eol, lno);
 			else if (opt->funcname)
 				show_funcname_line(opt, gs, bol, lno);
-			show_line(opt, bol, eol, gs->name, lno, ':');
+			show_line(opt, bol, eol, gs->name, gs->tree_name,
+				  gs->submodule_name, lno, ':');
 			last_hit = lno;
 			if (opt->funcbody)
 				show_function = 1;
@@ -1853,7 +1886,8 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 			/* If the last hit is within the post context,
 			 * we need to show this line.
 			 */
-			show_line(opt, bol, eol, gs->name, lno, '-');
+			show_line(opt, bol, eol, gs->name, gs->tree_name,
+				  gs->submodule_name, lno, '-');
 		}
 
 	next_line:
@@ -1871,7 +1905,7 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 		return opt->unmatch_name_only;
 	if (opt->unmatch_name_only) {
 		/* We did not see any hit, so we want to show this */
-		show_name(opt, gs->name);
+		show_name(opt, gs->name, gs->tree_name, gs->submodule_name);
 		return 1;
 	}
 
@@ -1886,6 +1920,10 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 	if (opt->count && count) {
 		char buf[32];
 		if (opt->pathname) {
+			output_prefix(opt, gs->tree_name,
+				      opt->color_branch, ':');
+			output_prefix(opt, gs->submodule_name,
+				      opt->color_submodule, '/');
 			output_color(opt, gs->name, strlen(gs->name),
 				     opt->color_filename);
 			output_sep(opt, ':');
@@ -1949,7 +1987,7 @@ int grep_buffer(struct grep_opt *opt, char *buf, unsigned long size)
 	struct grep_source gs;
 	int r;
 
-	grep_source_init(&gs, GREP_SOURCE_BUF, NULL, NULL, NULL);
+	grep_source_init(&gs, GREP_SOURCE_BUF, NULL, NULL, NULL, NULL, NULL);
 	gs.buf = buf;
 	gs.size = size;
 
@@ -1960,11 +1998,14 @@ int grep_buffer(struct grep_opt *opt, char *buf, unsigned long size)
 }
 
 void grep_source_init(struct grep_source *gs, enum grep_source_type type,
-		      const char *name, const char *path,
+		      const char *name, const char *tree_name,
+		      const char *submodule_name, const char *path,
 		      const void *identifier)
 {
 	gs->type = type;
 	gs->name = xstrdup_or_null(name);
+	gs->tree_name = xstrdup_or_null(tree_name);
+	gs->submodule_name = xstrdup_or_null(submodule_name);
 	gs->path = xstrdup_or_null(path);
 	gs->buf = NULL;
 	gs->size = 0;
@@ -1988,6 +2029,8 @@ void grep_source_clear(struct grep_source *gs)
 	FREE_AND_NULL(gs->name);
 	FREE_AND_NULL(gs->path);
 	FREE_AND_NULL(gs->identifier);
+	FREE_AND_NULL(gs->tree_name);
+	FREE_AND_NULL(gs->submodule_name);
 	grep_source_clear_data(gs);
 }
 
