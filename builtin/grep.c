@@ -99,7 +99,8 @@ static pthread_cond_t cond_result;
 static int skip_first_line;
 
 static void add_work(struct grep_opt *opt, enum grep_source_type type,
-		     const char *name, const char *path, const void *id)
+		     const char *name, const char *tree_name,
+		     const char *path, const void *id)
 {
 	grep_lock();
 
@@ -107,7 +108,8 @@ static void add_work(struct grep_opt *opt, enum grep_source_type type,
 		pthread_cond_wait(&cond_write, &grep_mutex);
 	}
 
-	grep_source_init(&todo[todo_end].source, type, name, path, id);
+	grep_source_init(&todo[todo_end].source, type, name, tree_name, path,
+			 id);
 	if (opt->binary != GREP_BINARY_TEXT)
 		grep_source_load_driver(&todo[todo_end].source);
 	todo[todo_end].done = 0;
@@ -326,14 +328,14 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 		     const char *path)
 {
 	struct strbuf pathbuf = STRBUF_INIT;
+	struct strbuf treebuf = STRBUF_INIT;
 
-	if (super_prefix) {
-		strbuf_add(&pathbuf, filename, tree_name_len);
+	if (tree_name_len)
+		strbuf_add(&treebuf, filename, tree_name_len - 1);
+
+	if (super_prefix)
 		strbuf_addstr(&pathbuf, super_prefix);
-		strbuf_addstr(&pathbuf, filename + tree_name_len);
-	} else {
-		strbuf_addstr(&pathbuf, filename);
-	}
+	strbuf_addstr(&pathbuf, filename + tree_name_len);
 
 	if (opt->relative && opt->prefix_length) {
 		char *name = strbuf_detach(&pathbuf, NULL);
@@ -344,8 +346,10 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 
 #ifndef NO_PTHREADS
 	if (num_threads) {
-		add_work(opt, GREP_SOURCE_OID, pathbuf.buf, path, oid);
+		add_work(opt, GREP_SOURCE_OID, pathbuf.buf, treebuf.buf, path,
+			 oid);
 		strbuf_release(&pathbuf);
+		strbuf_release(&treebuf);
 		return 0;
 	} else
 #endif
@@ -353,8 +357,10 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 		struct grep_source gs;
 		int hit;
 
-		grep_source_init(&gs, GREP_SOURCE_OID, pathbuf.buf, path, oid);
+		grep_source_init(&gs, GREP_SOURCE_OID, pathbuf.buf,
+				 treebuf.buf, path, oid);
 		strbuf_release(&pathbuf);
+		strbuf_release(&treebuf);
 		hit = grep_source(opt, &gs);
 
 		grep_source_clear(&gs);
@@ -378,7 +384,8 @@ static int grep_file(struct grep_opt *opt, const char *filename)
 
 #ifndef NO_PTHREADS
 	if (num_threads) {
-		add_work(opt, GREP_SOURCE_FILE, buf.buf, filename, filename);
+		add_work(opt, GREP_SOURCE_FILE, buf.buf, NULL, filename,
+			 filename);
 		strbuf_release(&buf);
 		return 0;
 	} else
@@ -387,7 +394,8 @@ static int grep_file(struct grep_opt *opt, const char *filename)
 		struct grep_source gs;
 		int hit;
 
-		grep_source_init(&gs, GREP_SOURCE_FILE, buf.buf, filename, filename);
+		grep_source_init(&gs, GREP_SOURCE_FILE, buf.buf, NULL,
+				 filename, filename);
 		strbuf_release(&buf);
 		hit = grep_source(opt, &gs);
 
@@ -638,11 +646,13 @@ static int grep_submodule_launch(struct grep_opt *opt,
 /*
  * Prep grep structures for a submodule grep
  * oid: the oid of the submodule or NULL if using the working tree
- * filename: name of the submodule including tree name of parent
+ * filename: name of the submodule
+ * tree_name: tree_name of parent
  * path: location of the submodule
  */
 static int grep_submodule(struct grep_opt *opt, const struct object_id *oid,
-			  const char *filename, const char *path)
+			  const char *filename, const char *tree_name,
+			  const char *path)
 {
 	if (!is_submodule_active(the_repository, path))
 		return 0;
@@ -666,7 +676,8 @@ static int grep_submodule(struct grep_opt *opt, const struct object_id *oid,
 
 #ifndef NO_PTHREADS
 	if (num_threads) {
-		add_work(opt, GREP_SOURCE_SUBMODULE, filename, path, oid);
+		add_work(opt, GREP_SOURCE_SUBMODULE, filename, tree_name, path,
+			 oid);
 		return 0;
 	} else
 #endif
@@ -675,7 +686,7 @@ static int grep_submodule(struct grep_opt *opt, const struct object_id *oid,
 		int hit;
 
 		grep_source_init(&gs, GREP_SOURCE_SUBMODULE,
-				 filename, path, oid);
+				 filename, tree_name, path, oid);
 		hit = grep_submodule_launch(opt, &gs);
 
 		grep_source_clear(&gs);
@@ -722,7 +733,8 @@ static int grep_cache(struct grep_opt *opt, const struct pathspec *pathspec,
 			}
 		} else if (recurse_submodules && S_ISGITLINK(ce->ce_mode) &&
 			   submodule_path_match(pathspec, name.buf, NULL)) {
-			hit |= grep_submodule(opt, NULL, ce->name, ce->name);
+			hit |= grep_submodule(opt, NULL, ce->name, ce->name,
+					      ce->name);
 		} else {
 			continue;
 		}
@@ -794,7 +806,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 					 check_attr);
 			free(data);
 		} else if (recurse_submodules && S_ISGITLINK(entry.mode)) {
-			hit |= grep_submodule(opt, entry.oid, base->buf,
+			hit |= grep_submodule(opt, entry.oid, base->buf, "toto",
 					      base->buf + tn_len);
 		}
 

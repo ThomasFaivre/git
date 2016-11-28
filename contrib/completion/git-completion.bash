@@ -2380,6 +2380,7 @@ _git_config ()
 		color.diff.whitespace
 		color.grep
 		color.grep.context
+		color.grep.branch
 		color.grep.filename
 		color.grep.function
 		color.grep.linenumber
