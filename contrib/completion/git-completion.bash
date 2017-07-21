@@ -1110,7 +1110,7 @@ _git_apply ()
 			--apply --no-add --exclude=
 			--ignore-whitespace --ignore-space-change
 			--whitespace= --inaccurate-eof --verbose
-			--recount --directory=
+			--recount --directory= --unsafe-paths
 			"
 		return
 	esac
