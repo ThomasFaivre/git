@@ -7,8 +7,7 @@ First you have to generate gitweb.cgi from gitweb.perl using
 to their destination. For example if git was (or is) installed with
 /usr prefix and gitwebdir is /var/www/cgi-bin, you can do
 
-	$ make prefix=/usr gitweb                            ;# as yourself
-	# make gitwebdir=/var/www/cgi-bin install-gitweb     ;# as root
+	# make prefix=/usr gitwebdir=/var/www/cgi-bin install-gitweb     ;# as root
 
 Alternatively you can use autoconf generated ./configure script to
 set up path to git binaries (via config.mak.autogen), so you can write
